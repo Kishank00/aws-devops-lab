@@ -12,33 +12,17 @@ variable "vpc_cidr" {
   description = "IPv4 CIDR block for this environment's VPC"
   type        = string
 }
-
-variable "public_subnet_cidr_01" {
-  description = "IPV4 CIDR block for public subnet in my_vpc"
-  type        = string
+variable "public_subnet_cidrs" {
+  description = "IPv4 CIDR blocks for the public subnets, one per AZ"
+  type        = list(string)
 }
 
-variable "private_subnet_cidr_01" {
-  description = "IPV4 CIDR block for private subnet in my_vpc"
-  type        = string
+variable "private_subnet_cidrs" {
+  description = "IPv4 CIDR blocks for the private subnets, one per AZ"
+  type        = list(string)
 }
 
-variable "availability_zone_1" {
-  description = "Availability zones for the High Availability of the applications"
-  type        = string
-}
-
-variable "public_subnet_cidr_02" {
-  description = "IPV4 CIDR block for public subnet 02 in my_vpc"
-  type        = string
-}
-
-variable "private_subnet_cidr_02" {
-  description = "IPV4 CIDR block for private subnet 02 in my_vpc"
-  type        = string
-}
-
-variable "availability_zone_2" {
-  description = "Availability zones for the High Availability of the applications"
-  type        = string
+variable "availability_zones" {
+  description = "AZs to spread subnets across"
+  type        = list(string)
 }
