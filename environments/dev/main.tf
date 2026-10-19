@@ -11,3 +11,9 @@ module "network" {
   private_subnet_cidrs = var.private_subnet_cidrs
   availability_zones   = var.availability_zones
 }
+
+module "ec2" {
+  source    = "../../modules/ec2"
+  vpc_id    = module.network.vpc_id
+  subnet_id = module.network.private_subnet_ids[0]
+}
