@@ -29,8 +29,36 @@ resource "aws_instance" "linux_diagnostic_tool" {
   instance_type          = "t3.micro"
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.ec2.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
   tags = {
     Name = "linux_diagnostic_tool"
   }
+}
+
+data "aws_iam_policy_document" "ec2_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+
+  }
+}
+
+resource "aws_iam_role" "ec2" {
+  name               = "ec2-ssm-role"
+  assume_role_policy = data.aws_iam_policy_document.ec2_trust.json
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2" {
+  name = "ec2-ssm-profile"
+  role = aws_iam_role.ec2.name
 }
