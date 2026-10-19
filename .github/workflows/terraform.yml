@@ -8,6 +8,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -23,3 +26,14 @@ jobs:
         run: |
           terraform init -backend=false
           terraform validate
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::286590629524:role/github-actions-terraform
+          aws-region: ap-south-1
+
+      - name: plan
+        working-directory: environments/dev
+        run: |
+          terraform init -input=false
+          terraform plan -input=false

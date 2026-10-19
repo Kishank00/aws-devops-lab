@@ -5,7 +5,6 @@ terraform {
     bucket       = "devops-lab-tfstate-286590629524"
     key          = "dev/network/terraform.tfstate"
     region       = "ap-south-1"
-    profile      = "personal"
     encrypt      = true
     use_lockfile = true
   }

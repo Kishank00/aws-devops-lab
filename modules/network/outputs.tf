@@ -3,11 +3,6 @@ output "vpc_id" {
   value       = aws_vpc.my_vpc.id
 }
 
-output "vpc_arn" {
-  description = "ARN of the VPC"
-  value       = aws_vpc.my_vpc.arn
-}
-
 output "vpc_cidr_block" {
   description = "IPv4 CIDR block of the VPC"
   value       = aws_vpc.my_vpc.cidr_block
