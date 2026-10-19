@@ -24,7 +24,7 @@ data "aws_iam_policy_document" "github_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:Kishank00/aws-devops-lab:*"]
+      values = ["repo:Kishank00@89375740/aws-devops-lab@1425625859:*"]
     }
   }
 }
