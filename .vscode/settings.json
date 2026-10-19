@@ -25,5 +25,15 @@
     "terraform.validation.enableEnhancedValidation": true,
 
     // Run `terraform validate` on every save and list the errors in the Problems panel
-    "terraform.experimentalFeatures.validateOnSave": true
+    "terraform.experimentalFeatures.validateOnSave": true,
+
+    // Run `terraform fmt` on every save so CI's `fmt -check` never fails
+    "[terraform]": {
+        "editor.defaultFormatter": "hashicorp.terraform",
+        "editor.formatOnSave": true
+    },
+    "[terraform-vars]": {
+        "editor.defaultFormatter": "hashicorp.terraform",
+        "editor.formatOnSave": true
+    }
 }
