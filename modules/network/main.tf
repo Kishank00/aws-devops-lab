@@ -7,45 +7,26 @@ resource "aws_vpc" "my_vpc" {
 }
 
 # Subnet Blocks
-resource "aws_subnet" "public_subnet_01" {
+resource "aws_subnet" "public" {
+  count                   = length(var.public_subnet_cidrs)
   vpc_id                  = aws_vpc.my_vpc.id
-  cidr_block              = var.public_subnet_cidr_01
-  availability_zone       = var.availability_zone_1
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = var.availability_zones[count.index]
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "public-subnet-01"
+    Name = "${var.name}-public-${count.index + 1}"
   }
 }
 
-resource "aws_subnet" "public_subnet_02" {
-  vpc_id                  = aws_vpc.my_vpc.id
-  cidr_block              = var.public_subnet_cidr_02
-  availability_zone       = var.availability_zone_2
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "public-subnet-02"
-  }
-}
-
-resource "aws_subnet" "private_subnet_01" {
+resource "aws_subnet" "private" {
+  count             = length(var.private_subnet_cidrs)
   vpc_id            = aws_vpc.my_vpc.id
-  cidr_block        = var.private_subnet_cidr_01
-  availability_zone = var.availability_zone_1
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = var.availability_zones[count.index]
 
   tags = {
-    Name = "private-subnet-01"
-  }
-}
-
-resource "aws_subnet" "private_subnet_02" {
-  vpc_id            = aws_vpc.my_vpc.id
-  cidr_block        = var.private_subnet_cidr_02
-  availability_zone = var.availability_zone_2
-
-  tags = {
-    Name = "private-subnet-02"
+    Name = "${var.name}-private-${count.index + 1}"
   }
 }
 
@@ -54,7 +35,7 @@ resource "aws_internet_gateway" "my_igw" {
   vpc_id = aws_vpc.my_vpc.id
 
   tags = {
-    Name = "my-igw"
+    Name = "${var.name}-my-igw"
   }
 }
 
@@ -63,17 +44,17 @@ resource "aws_eip" "my_eip" {
   domain = "vpc"
 
   tags = {
-    Name = "nat-gw-eip"
+    Name = "${var.name}-nat-gw-eip"
   }
 }
 
 # NAT Gateway Block
 resource "aws_nat_gateway" "my_nat_gw" {
   allocation_id = aws_eip.my_eip.id
-  subnet_id     = aws_subnet.public_subnet_01.id
+  subnet_id     = aws_subnet.public[0].id
 
   tags = {
-    Name = "my-nat-gw"
+    Name = "${var.name}-my-nat-gw"
   }
 
   depends_on = [aws_internet_gateway.my_igw]
@@ -109,22 +90,15 @@ resource "aws_route_table" "private_route_table" {
 }
 
 # Route Table Association
-resource "aws_route_table_association" "public_association_01" {
-  subnet_id      = aws_subnet.public_subnet_01.id
+resource "aws_route_table_association" "public" {
+  count          = length(var.public_subnet_cidrs)
+  subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public_route_table.id
 }
 
-resource "aws_route_table_association" "private_association_01" {
-  subnet_id      = aws_subnet.private_subnet_01.id
+resource "aws_route_table_association" "private" {
+  count          = length(var.private_subnet_cidrs)
+  subnet_id      = aws_subnet.private[count.index].id
   route_table_id = aws_route_table.private_route_table.id
 }
 
-resource "aws_route_table_association" "public_association_02" {
-  subnet_id      = aws_subnet.public_subnet_02.id
-  route_table_id = aws_route_table.public_route_table.id
-}
-
-resource "aws_route_table_association" "private_association_02" {
-  subnet_id      = aws_subnet.private_subnet_02.id
-  route_table_id = aws_route_table.private_route_table.id
-}

@@ -19,5 +19,11 @@
         "strings": "off"
     },
     "editor.suggestOnTriggerCharacters": true,
-    "editor.suggest.preview": false
+    "editor.suggest.preview": false,
+
+    // Show reference errors (e.g. undeclared resource) as red squiggles while typing
+    "terraform.validation.enableEnhancedValidation": true,
+
+    // Run `terraform validate` on every save and list the errors in the Problems panel
+    "terraform.experimentalFeatures.validateOnSave": true
 }
