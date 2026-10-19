@@ -1,0 +1,23 @@
+{
+    // Turn off inline gray "ghost text" suggestions (Copilot / AI completions)
+    "editor.inlineSuggest.enabled": false,
+    "github.copilot.enable": {
+        "*": false
+    },
+    "github.copilot.nextEditSuggestions.enabled": false,
+
+    // Turn off generic word-based guesses (words copied from open files)
+    "editor.wordBasedSuggestions": "off",
+
+    // Turn off snippet templates so the list only shows real symbols
+    "editor.snippetSuggestions": "none",
+
+    // Keep Terraform IntelliSense dropdown (e.g. `aws_vpc.this.` shows its attributes)
+    "editor.quickSuggestions": {
+        "other": "on",
+        "comments": "off",
+        "strings": "off"
+    },
+    "editor.suggestOnTriggerCharacters": true,
+    "editor.suggest.preview": false
+}

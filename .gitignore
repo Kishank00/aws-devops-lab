@@ -1,0 +1,25 @@
+# Provider plugins and module cache (recreated by `terraform init`)
+.terraform/
+
+# State lives in S3; never commit a local copy
+*.tfstate
+*.tfstate.*
+
+# Saved plans can contain secret values
+tfplan
+*.tfplan
+
+# Variable files are ignored by default in case they hold secrets...
+*.tfvars
+*.tfvars.json
+# ...except the per-environment config, which holds none and is needed to rebuild
+!environments/*/terraform.tfvars
+
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
