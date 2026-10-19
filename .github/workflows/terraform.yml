@@ -37,3 +37,32 @@ jobs:
         run: |
           terraform init -input=false
           terraform plan -input=false
+
+  apply:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: terraform-dev
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::286590629524:role/github-actions-terraform-apply
+          aws-region: ap-south-1
+
+      - name: apply
+        working-directory: environments/dev
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve
