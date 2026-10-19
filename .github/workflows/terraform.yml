@@ -58,7 +58,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::286590629524:role/github-actions-terraform-apply
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ap-south-1
 
       - name: apply
