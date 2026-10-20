@@ -18,3 +18,8 @@ variable "instance_type" {
   type        = string
   default     = "t3.micro"
 }
+
+variable "alb_security_group_id" {
+  description = "ID of the ALB security group allowed to reach the instance on port 80"
+  type        = string
+}
