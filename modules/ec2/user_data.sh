@@ -1,7 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-#1. Install nginx
+# 0. Wait for internet (max 30 tries, about 5 min): the NAT may still be starting on a fresh apply
+tries=0
+until curl -s --max-time 5 -o /dev/null https://github.com; do
+  tries=$((tries + 1))
+  if [ "$tries" -ge 30 ]; then
+    echo "no internet after 30 tries, giving up"
+    exit 1
+  fi
+  echo "waiting for internet... ($tries/30)"
+  sleep 5
+done
+
+# 1. Install nginx
 apt-get update -y
 apt-get install -y nginx
 
@@ -11,14 +23,11 @@ useradd --system --create-home --home-dir /opt/sysdiag --shell /usr/sbin/nologin
 # 3. Get the code (as the app user, so it owns the files)
 sudo -u sysdiag git clone https://github.com/Kishank00/linux-diagnostic-tool.git /opt/sysdiag/app
 
-
 # 4. Install uv for the app user
 sudo -u sysdiag -H bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 
-
 # 5. Install dependencies from the lockfile into /opt/sysdiag/app/.venv
 sudo -u sysdiag -H /opt/sysdiag/.local/bin/uv --directory /opt/sysdiag/app sync --locked --no-dev
-
 
 # 6. Run the app as a systemd service
 cat > /etc/systemd/system/sysdiag.service <<'EOF'
@@ -40,7 +49,6 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now sysdiag
-
 
 # 7. nginx reverse proxy: port 80 -> app on 127.0.0.1:8000
 cat > /etc/nginx/sites-available/sysdiag <<'EOF'
