@@ -25,15 +25,23 @@ data "aws_ami" "ubuntu" {
 }
 
 resource "aws_instance" "linux_diagnostic_tool" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  subnet_id              = var.subnet_id
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2.name
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  subnet_id                   = var.subnet_id
+  vpc_security_group_ids      = [aws_security_group.ec2.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  user_data_replace_on_change = true
 
+  user_data = <<-EOF
+    #!/bin/bash
+    apt-get update -y
+    apt-get install -y nginx
+    systemctl enable --now nginx
+  EOF
   tags = {
     Name = "${var.name}-diagnostic"
   }
+
 }
 
 data "aws_iam_policy_document" "ec2_trust" {
