@@ -13,7 +13,9 @@ module "network" {
 }
 
 module "ec2" {
-  source    = "../../modules/ec2"
+  source = "../../modules/ec2"
+
+  name      = local.name
   vpc_id    = module.network.vpc_id
   subnet_id = module.network.private_subnet_ids[0]
 }
