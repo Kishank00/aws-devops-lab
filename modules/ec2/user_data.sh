@@ -69,3 +69,15 @@ ln -s /etc/nginx/sites-available/sysdiag /etc/nginx/sites-enabled/sysdiag
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl reload nginx
+
+
+# 8. Deploy script for future releases: pull, update deps, restart, health check
+cat > /usr/local/bin/deploy-sysdiag <<'EOF'
+#!/bin/bash
+set -euo pipefail
+sudo -u sysdiag git -C /opt/sysdiag/app pull --ff-only
+sudo -u sysdiag -H /opt/sysdiag/.local/bin/uv --directory /opt/sysdiag/app sync --locked --no-dev
+systemctl restart sysdiag
+curl -fsS --retry 10 --retry-delay 2 --retry-connrefused http://localhost/health
+EOF
+chmod 755 /usr/local/bin/deploy-sysdiag
