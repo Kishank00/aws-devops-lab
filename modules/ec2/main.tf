@@ -40,16 +40,10 @@ resource "aws_instance" "linux_diagnostic_tool" {
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   user_data_replace_on_change = true
 
-  user_data = <<-EOF
-    #!/bin/bash
-    apt-get update -y
-    apt-get install -y nginx
-    systemctl enable --now nginx
-  EOF
+  user_data = file("${path.module}/user_data.sh")
   tags = {
     Name = "${var.name}-diagnostic"
   }
-
 }
 
 data "aws_iam_policy_document" "ec2_trust" {
