@@ -79,3 +79,15 @@ resource "aws_iam_instance_profile" "ec2" {
   name = "${var.name}-ec2-ssm-profile"
   role = aws_iam_role.ec2.name
 }
+
+resource "aws_ssm_parameter" "image_tag" {
+  name        = "/${var.name}/sysdiag/image-tag"
+  description = "Image tag of the live sysdiag container, updated by the app CI after each deploy"
+  type        = "String"
+  value       = "33413c36d9bc6eb53c6a35259238be2e1930ac7a"
+  depends_on  = [aws_iam_role_policy_attachment.this, aws_ssm_parameter.image_tag]
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}

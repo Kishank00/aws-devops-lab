@@ -119,6 +119,11 @@ curl -fsS --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8001/he
 EOF
 chmod 755 /usr/local/bin/deploy-sysdiag-docker
 
-# 10. Start the Docker version with its first image (later releases come from CI)
-/usr/local/bin/deploy-sysdiag-docker 383aef87ffdb02fdd43b6e4bdadacc4aecafbc44
+# 10. Start the Docker version with the live image tag from Parameter Store
+snap install aws-cli --classic
+tag=$(/snap/bin/aws ssm get-parameter \
+  --region ap-south-1 \
+  --name /devops-lab-dev/sysdiag/image-tag \
+  --query Parameter.Value --output text)
+/usr/local/bin/deploy-sysdiag-docker "$tag"
 
