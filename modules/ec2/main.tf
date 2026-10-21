@@ -63,9 +63,13 @@ resource "aws_iam_role" "ec2" {
   assume_role_policy = data.aws_iam_policy_document.ec2_trust.json
 }
 
-resource "aws_iam_role_policy_attachment" "ssm" {
+resource "aws_iam_role_policy_attachment" "this" {
+  for_each = {
+    "ssm"      = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "ecr_read" = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  }
   role       = aws_iam_role.ec2.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  policy_arn = each.value
 }
 
 resource "aws_iam_instance_profile" "ec2" {
