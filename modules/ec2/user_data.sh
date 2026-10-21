@@ -115,7 +115,7 @@ image="286590629524.dkr.ecr.ap-south-1.amazonaws.com/linux-diagnostic-tool:$tag"
 docker pull "$image"
 docker rm -f sysdiag || true
 docker run -d --name sysdiag --restart unless-stopped -p 127.0.0.1:8001:8000 "$image"
-curl -fsS --retry 10 --retry-delay 2 --retry-connrefused http://127.0.0.1:8001/health
+curl -fsS --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8001/health
 EOF
 chmod 755 /usr/local/bin/deploy-sysdiag-docker
 
