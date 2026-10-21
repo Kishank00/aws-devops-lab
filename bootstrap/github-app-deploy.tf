@@ -71,6 +71,12 @@ data "aws_iam_policy_document" "app_deploy" {
     ]
     resources = ["arn:aws:ecr:ap-south-1:${data.aws_caller_identity.current.account_id}:repository/linux-diagnostic-tool"]
   }
+
+  # 6. Record the live image tag after a successful deploy
+  statement {
+    actions   = ["ssm:PutParameter"]
+    resources = ["arn:aws:ssm:ap-south-1:${data.aws_caller_identity.current.account_id}:parameter/devops-lab-dev/sysdiag/image-tag"]
+  }
 }
 
 resource "aws_iam_role_policy" "app_deploy" {
