@@ -75,7 +75,9 @@ data "aws_iam_policy_document" "github_apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:Kishank00@89375740/aws-devops-lab@1425625859:environment:dev"]
+      values = [
+        "repo:Kishank00@89375740/aws-devops-lab@1425625859:environment:dev", "repo:Kishank00@89375740/aws-devops-lab@1425625859:environment:shared"
+      ]
     }
   }
 }

@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [dev, shared]
     permissions:
       id-token: write
       contents: read
@@ -22,7 +26,7 @@ jobs:
         run: terraform fmt -check -recursive
 
       - name: validate
-        working-directory: environments/dev
+        working-directory: environments/${{ matrix.stack }}
         run: |
           terraform init -backend=false
           terraform validate
@@ -33,7 +37,7 @@ jobs:
           aws-region: ap-south-1
 
       - name: plan
-        working-directory: environments/dev
+        working-directory: environments/${{ matrix.stack }}
         run: |
           terraform init -input=false
           terraform plan -input=false
@@ -42,9 +46,13 @@ jobs:
     needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: dev
+    strategy:
+      max-parallel: 1
+      matrix:
+        stack: [shared, dev]
+    environment: ${{ matrix.stack }}
     concurrency:
-      group: terraform-dev
+      group: terraform-${{ matrix.stack }}
       cancel-in-progress: false
     permissions:
       id-token: write
@@ -62,7 +70,7 @@ jobs:
           aws-region: ap-south-1
 
       - name: apply
-        working-directory: environments/dev
+        working-directory: environments/${{ matrix.stack }}
         run: |
           terraform init -input=false
           terraform apply -input=false -auto-approve
