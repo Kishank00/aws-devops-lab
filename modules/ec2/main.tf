@@ -41,9 +41,8 @@ resource "aws_instance" "linux_diagnostic_tool" {
   vpc_security_group_ids      = [aws_security_group.ec2.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   user_data_replace_on_change = true
-  depends_on                  = [aws_iam_role_policy_attachment.this]
-
-  user_data = file("${path.module}/user_data.sh")
+  depends_on                  = [aws_iam_role_policy_attachment.this, aws_ssm_parameter.image_tag]
+  user_data                   = file("${path.module}/user_data.sh")
   tags = {
     Name = "${var.name}-diagnostic"
   }
@@ -85,7 +84,6 @@ resource "aws_ssm_parameter" "image_tag" {
   description = "Image tag of the live sysdiag container, updated by the app CI after each deploy"
   type        = "String"
   value       = "33413c36d9bc6eb53c6a35259238be2e1930ac7a"
-  depends_on  = [aws_iam_role_policy_attachment.this, aws_ssm_parameter.image_tag]
 
   lifecycle {
     ignore_changes = [value]
