@@ -53,6 +53,24 @@ data "aws_iam_policy_document" "app_deploy" {
     ]
     resources = ["*"]
   }
+
+  # 4. Log in to ECR (account-wide, so it can't be narrowed to one repo)
+  statement {
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  # 5. Push images, only to this app's repo
+  statement {
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+    resources = ["arn:aws:ecr:ap-south-1:${data.aws_caller_identity.current.account_id}:repository/linux-diagnostic-tool"]
+  }
 }
 
 resource "aws_iam_role_policy" "app_deploy" {
