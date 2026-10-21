@@ -1,3 +1,10 @@
+locals {
+  app_ports = {
+    vm     = 80
+    docker = 8080
+  }
+}
+
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb-sg"
   description = "ALB: HTTP from internet"
@@ -8,12 +15,14 @@ resource "aws_security_group" "alb" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "http" {
+resource "aws_vpc_security_group_ingress_rule" "from_internet" {
+  for_each = toset(["80", "8080"])
+
   security_group_id = aws_security_group.alb.id
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
-  from_port         = 80
-  to_port           = 80
+  from_port         = each.key
+  to_port           = each.key
 }
 
 resource "aws_vpc_security_group_egress_rule" "all" {
@@ -23,8 +32,10 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name     = "${var.name}-tg"
-  port     = 80
+  for_each = local.app_ports
+
+  name     = "${var.name}-${each.key}-tg"
+  port     = each.value
   protocol = "HTTP"
   vpc_id   = var.vpc_id
 
@@ -47,18 +58,22 @@ resource "aws_lb" "app" {
 }
 
 resource "aws_lb_listener" "http" {
+  for_each = local.app_ports
+
   load_balancer_arn = aws_lb.app.arn
-  port              = 80
+  port              = each.value
   protocol          = "HTTP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
+    target_group_arn = aws_lb_target_group.app[each.key].arn
   }
 }
 
 resource "aws_lb_target_group_attachment" "app" {
-  target_group_arn = aws_lb_target_group.app.arn
+  for_each = local.app_ports
+
+  target_group_arn = aws_lb_target_group.app[each.key].arn
   target_id        = var.instance_id
-  port             = 80
+  port             = each.value
 }

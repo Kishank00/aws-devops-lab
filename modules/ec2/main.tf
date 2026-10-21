@@ -14,12 +14,14 @@ resource "aws_vpc_security_group_egress_rule" "allow_all_traffic_ipv4" {
   ip_protocol       = "-1"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "http_from_alb" {
+resource "aws_vpc_security_group_ingress_rule" "from_alb" {
+  for_each = toset(["80", "8080"])
+
   security_group_id            = aws_security_group.ec2.id
   referenced_security_group_id = var.alb_security_group_id
   ip_protocol                  = "tcp"
-  from_port                    = 80
-  to_port                      = 80
+  from_port                    = each.key
+  to_port                      = each.key
 }
 
 data "aws_ami" "ubuntu" {
@@ -39,6 +41,7 @@ resource "aws_instance" "linux_diagnostic_tool" {
   vpc_security_group_ids      = [aws_security_group.ec2.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   user_data_replace_on_change = true
+  depends_on                  = [aws_iam_role_policy_attachment.this]
 
   user_data = file("${path.module}/user_data.sh")
   tags = {

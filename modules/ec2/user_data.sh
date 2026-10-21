@@ -13,9 +13,28 @@ until curl -s --max-time 5 -o /dev/null https://github.com; do
   sleep 5
 done
 
-# 1. Install nginx
+# 1. Install nginx and Docker
 apt-get update -y
-apt-get install -y nginx
+apt-get install -y nginx docker.io
+systemctl enable --now docker
+
+# 1b. Let Docker pull from ECR with the instance role (no docker login needed)
+apt-get install -y amazon-ecr-credential-helper
+mkdir -p /root/.docker
+cat > /root/.docker/config.json <<'EOF'
+{
+  "credHelpers": {
+    "286590629524.dkr.ecr.ap-south-1.amazonaws.com": "ecr-login"
+  }
+}
+EOF
+
+# 1c. Run the app container (only reachable from this server, nginx proxies to it)
+docker run -d \
+  --name sysdiag \
+  --restart unless-stopped \
+  -p 127.0.0.1:8001:8000 \
+  286590629524.dkr.ecr.ap-south-1.amazonaws.com/linux-diagnostic-tool:383aef87ffdb02fdd43b6e4bdadacc4aecafbc44
 
 # 2. Create the app's service account
 useradd --system --create-home --home-dir /opt/sysdiag --shell /usr/sbin/nologin sysdiag
@@ -50,7 +69,7 @@ EOF
 systemctl daemon-reload
 systemctl enable --now sysdiag
 
-# 7. nginx reverse proxy: port 80 -> app on 127.0.0.1:8000
+# 7. nginx reverse proxy: port 80 -> app on 127.0.0.1:8000, 8080 -> container on 127.0.0.1:8001
 cat > /etc/nginx/sites-available/sysdiag <<'EOF'
 server {
     listen 80;
@@ -63,13 +82,24 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
+
+server {
+    listen 8080;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
 EOF
 
 ln -s /etc/nginx/sites-available/sysdiag /etc/nginx/sites-enabled/sysdiag
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl reload nginx
-
 
 # 8. Deploy script for future releases: pull, update deps, restart, health check
 cat > /usr/local/bin/deploy-sysdiag <<'EOF'
