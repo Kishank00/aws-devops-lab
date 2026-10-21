@@ -29,13 +29,6 @@ cat > /root/.docker/config.json <<'EOF'
 }
 EOF
 
-# 1c. Run the app container (only reachable from this server, nginx proxies to it)
-docker run -d \
-  --name sysdiag \
-  --restart unless-stopped \
-  -p 127.0.0.1:8001:8000 \
-  286590629524.dkr.ecr.ap-south-1.amazonaws.com/linux-diagnostic-tool:383aef87ffdb02fdd43b6e4bdadacc4aecafbc44
-
 # 2. Create the app's service account
 useradd --system --create-home --home-dir /opt/sysdiag --shell /usr/sbin/nologin sysdiag
 
@@ -111,3 +104,21 @@ systemctl restart sysdiag
 curl -fsS --retry 10 --retry-delay 2 --retry-connrefused http://localhost/health
 EOF
 chmod 755 /usr/local/bin/deploy-sysdiag
+
+# 9. Deploy script for the Docker version: deploy-sysdiag-docker <image tag>
+cat > /usr/local/bin/deploy-sysdiag-docker <<'EOF'
+#!/bin/bash
+set -euo pipefail
+tag="${1:?usage: deploy-sysdiag-docker <image tag>}"
+image="286590629524.dkr.ecr.ap-south-1.amazonaws.com/linux-diagnostic-tool:$tag"
+
+docker pull "$image"
+docker rm -f sysdiag || true
+docker run -d --name sysdiag --restart unless-stopped -p 127.0.0.1:8001:8000 "$image"
+curl -fsS --retry 10 --retry-delay 2 --retry-connrefused http://127.0.0.1:8001/health
+EOF
+chmod 755 /usr/local/bin/deploy-sysdiag-docker
+
+# 10. Start the Docker version with its first image (later releases come from CI)
+/usr/local/bin/deploy-sysdiag-docker 383aef87ffdb02fdd43b6e4bdadacc4aecafbc44
+
