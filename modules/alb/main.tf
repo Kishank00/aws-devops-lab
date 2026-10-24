@@ -34,10 +34,11 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 resource "aws_lb_target_group" "app" {
   for_each = local.app_ports
 
-  name     = "${var.name}-${each.key}-tg"
-  port     = each.value
-  protocol = "HTTP"
-  vpc_id   = var.vpc_id
+  name                 = "${var.name}-${each.key}-tg"
+  port                 = each.value
+  protocol             = "HTTP"
+  vpc_id               = var.vpc_id
+  deregistration_delay = 30
 
   health_check {
     path    = "/health"
