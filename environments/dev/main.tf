@@ -17,8 +17,9 @@ module "ec2" {
 
   name                  = local.name
   vpc_id                = module.network.vpc_id
-  subnet_id             = module.network.private_subnet_ids[0]
+  subnet_ids            = module.network.private_subnet_ids
   alb_security_group_id = module.alb.security_group_id
+  target_group_arns     = module.alb.target_group_arns
 }
 
 module "alb" {
@@ -27,5 +28,4 @@ module "alb" {
   name              = local.name
   vpc_id            = module.network.vpc_id
   public_subnet_ids = module.network.public_subnet_ids
-  instance_id       = module.ec2.instance_id
 }

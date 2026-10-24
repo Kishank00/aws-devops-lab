@@ -1,4 +1,4 @@
-output "instance_id" {
-  description = "ID of the EC2 instance"
-  value       = aws_instance.linux_diagnostic_tool.id
+output "asg_name" {
+  description = "Name of the app Auto Scaling Group"
+  value       = aws_autoscaling_group.app.name
 }
