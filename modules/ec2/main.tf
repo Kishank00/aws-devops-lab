@@ -57,6 +57,7 @@ resource "aws_launch_template" "app" {
 resource "aws_autoscaling_group" "app" {
   name                      = "${var.name}-asg"
   vpc_zone_identifier       = var.subnet_ids
+  default_instance_warmup   = 300
   max_size                  = 4
   min_size                  = 2
   health_check_grace_period = 600
