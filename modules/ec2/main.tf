@@ -34,12 +34,23 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+data "aws_ami" "sysdiag" {
+  count       = var.image_strategy == "bake" ? 1 : 0
+  most_recent = true
+  owners      = ["self"]
+
+  filter {
+    name   = "name"
+    values = ["sysdiag-base-*"]
+  }
+}
+
 resource "aws_launch_template" "app" {
   name_prefix            = "${var.name}-app-"
-  image_id               = data.aws_ami.ubuntu.id
+  image_id               = var.image_strategy == "bake" ? data.aws_ami.sysdiag[0].id : data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.ec2.id]
-  user_data              = base64encode(file("${path.module}/user_data.sh"))
+  user_data              = base64encode(file("${path.module}/user_data_${var.image_strategy}.sh"))
   update_default_version = true
 
   iam_instance_profile {

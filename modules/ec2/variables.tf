@@ -28,3 +28,14 @@ variable "target_group_arns" {
   description = "ARNs of the ALB target groups the ASG registers its instances in"
   type        = list(string)
 }
+
+variable "image_strategy" {
+  description = "fry: stock Ubuntu configured at boot by user_data; bake: the Packer-built AMI with a short boot script"
+  type        = string
+  default     = "bake"
+
+  validation {
+    condition     = contains(["fry", "bake"], var.image_strategy)
+    error_message = "image_strategy must be \"fry\" or \"bake\"."
+  }
+}
