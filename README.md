@@ -6,7 +6,7 @@ A hands-on DevOps project. One real application, [linux-diagnostic-tool](https:/
 |---|---|---|
 | **1. Virtual machines** | EC2 + systemd + nginx, the classic "on-prem" way, fully automated | ✅ Done |
 | **2. Containers** | Docker image built by CI, stored in ECR, run on the same EC2 next to the VM version | ✅ Done |
-| **3. Scaling and high availability** | Auto Scaling Group across 2 AZs, self-healing, rolling replacement, immutable releases | 🚧 Infrastructure done and verified; immutable release pipeline written, not yet tested end to end |
+| **3. Scaling and high availability** | Auto Scaling Group across 2 AZs, self-healing, rolling replacement, immutable releases | ✅ Done: zero-downtime release and self-healing tested (rollout speed-up merged, to be measured) |
 | **4. Orchestration** | Kubernetes | 🔜 Planned |
 
 All infrastructure is Terraform. All deployments run through GitHub Actions with OIDC, so no AWS keys are stored anywhere.
@@ -17,6 +17,17 @@ Phases 1 and 2 run **side by side on every server**, so the two approaches can b
 |---|---|
 | `http://<alb-dns>/` | Phase 1: app installed on the VM, run by systemd |
 | `http://<alb-dns>:8080/` | Phase 2: the same app as a Docker container |
+
+### Browse the code of each phase
+
+Every finished phase is tagged with the same name in both repos, so the code of any era can be opened as it was (GitHub branch dropdown → **Tags**, or `git checkout <tag>`):
+
+| Tag | What the code does | Infrastructure | App CI |
+|---|---|---|---|
+| `phase-1-vm-ec2` | one EC2, app on systemd + nginx, released over SSM | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-1-vm-ec2) | [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool/tree/phase-1-vm-ec2) |
+| `phase-2-docker-ecr` | + the app as a Docker container from ECR on the same EC2, live tag in Parameter Store | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-2-docker-ecr) | [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool/tree/phase-2-docker-ecr) |
+| `phase-3-autoscaling-asg` | Auto Scaling Group across 2 AZs, instance refresh, immutable releases; servers configured at boot by user_data ("fry") | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-3-autoscaling-asg) | [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool/tree/phase-3-autoscaling-asg) |
+| `phase-3b-packer-ami-build` | Packer + Ansible template that bakes the server software into an AMI (not yet used by Terraform) | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-3b-packer-ami-build) | (no change) |
 
 ---
 
@@ -41,6 +52,7 @@ Phases 1 and 2 run **side by side on every server**, so the two approaches can b
   - [Infrastructure changes: instance refresh](#infrastructure-changes-instance-refresh)
   - [Release pipeline: replace, don't patch](#release-pipeline-replace-dont-patch)
   - [Rollback](#rollback)
+  - [Test results](#test-results)
   - [Lessons learned](#lessons-learned)
   - [Known limitations](#known-limitations-1)
 - [Phase 4: Orchestration (Kubernetes)](#phase-4-orchestration-kubernetes)
@@ -393,9 +405,14 @@ step 2:  [v1] [v1] [v2✓] [v2✓]   new ones pass /health
 step 3:            [v2✓] [v2✓]   old ones drained and terminated
 ```
 
-### Release pipeline: replace, don't patch
+Two timers decide how long a refresh takes:
 
-> 🚧 Written, not yet tested end to end.
+| Setting | Value | Why |
+|---|---|---|
+| `default_instance_warmup` (ASG) | 300 s | how long a new instance must be in service before the refresh trusts it and moves on. It must cover the real boot time (3-4 min), because during the grace period the ASG counts a still-booting instance as healthy. Set on the ASG, so it applies to every refresh (Terraform's and the CI's) and to scaling policies. Without it, the warmup falls back to the 600 s grace period. |
+| `deregistration_delay` (target groups) | 30 s | how long the ALB drains an old instance before it is terminated. The default is 300 s; this app's requests take milliseconds. |
+
+### Release pipeline: replace, don't patch
 
 There are two ways to put a new version on servers: **patch** them (Phase 2, Ansible, SSM) or **replace** them with fresh ones (Kubernetes, Spinnaker, CodeDeploy blue/green). Phase 3 replaces. Every server is then fresh and identical, the ALB drains old servers so no request fails, and nothing drifts.
 
@@ -416,7 +433,7 @@ test-and-build ──► publish-ecr ──► deploy-asg
 - One job updates **both** versions: new servers clone `master` (VM version) and pull the tagged image (Docker version) at boot.
 - The CI passes the 100/200 preferences itself. The `instance_refresh` block in Terraform only applies to refreshes that Terraform starts; a refresh started from the CLI would otherwise use the AWS default (90%), which terminates one of the two servers first.
 - The job runs in a `deploy-asg` concurrency group that never cancels a running deploy, so two refreshes never overlap.
-- A release takes several minutes, because every server boots from scratch. Baking the app into an AMI (Packer) is the planned fix.
+- A release takes several minutes, because every server boots from scratch (see [Test results](#test-results)). Baking the app into an AMI (Packer) is the planned fix.
 
 ### Rollback
 
@@ -440,10 +457,46 @@ test-and-build ──► publish-ecr ──► deploy-asg
 
 **Emergency (one server, seconds instead of minutes):** from an SSM session, `sudo deploy-sysdiag-docker <previous sha>`. This patches only that server, so finish with steps 2 and 3, or the next new server boots the bad version.
 
+### Test results
+
+Both tests ran against the live dev environment on 2026-10-24, with a probe hitting `/health` on `:80` and `:8080` through the ALB every 2 seconds.
+
+**1. Release by instance refresh** (app commit `5bcc666`, pushed to `master`):
+
+| Measure | Result |
+|---|---|
+| Health probes during the rollout | 400, **0 failed** |
+| Refresh duration | 15 min 42 s |
+| Result | both new instances (AZ a and b) run `linux-diagnostic-tool:5bcc666`, and the parameter holds the new tag |
+
+Where the 15 minutes went:
+
+```
+~1.5 min  test, build and push the image
+~3-4 min  new instances boot (user_data)       ← real work
+~6 min    waiting for the 600 s warmup          ← timer
+~5 min    draining the old instances (300 s)    ← timer
+```
+
+The timers were then cut to 300 s warmup and 30 s drain (see [Infrastructure changes](#infrastructure-changes-instance-refresh)), which should bring a release to about 6-7 minutes. Not measured yet.
+
+**2. Self-healing** (one instance terminated by hand in the console):
+
+| Time | Event |
+|---|---|
+| t+0 | instance in AZ a terminated |
+| t+33 s | ASG takes it out of service ("EC2 health check indicating it has been terminated") |
+| t+34 s | replacement launched, **in the same AZ** (AZ balancing) |
+| t+3 min 20 s | replacement healthy in both target groups |
+
+5 of 80 probes failed (502 or timeout), all in the first ~15 seconds. A crash is not a graceful refresh: the ALB keeps sending requests to the dead instance until its health checks fail. A shorter health check interval and a lower unhealthy threshold would shrink that window. After that, the surviving instance in AZ b served everything.
+
 ### Lessons learned
 
 - **The first ASG in an account can fail with "Access denied when attempting to assume role AWSServiceRoleForAutoScaling".** AWS creates that service-linked role on the first `CreateAutoScalingGroup`, and IAM takes a minute or two to make a new role usable. The ASG retried on its own and launched both instances, but Terraform had already seen the failed launches and marked the ASG as tainted. Re-running the apply replaced it cleanly. This happens once per account.
 - **ALB fails open.** While the containers were still starting, every target in the `docker` group was unhealthy, yet `:8080/health` already answered. When all targets in a group are unhealthy, the ALB sends traffic to all of them anyway.
+- **Most of a slow refresh is timers, not work.** Without an explicit warmup, the refresh waited for the full 600 s grace period, then the target groups drained for their default 300 s. Together they were about 11 of the 16 minutes.
+- **Merging a PR seconds after opening it makes two pipeline runs plan at once**, and the second fails on the state lock. The plans now wait (`-lock-timeout=5m`), and the habit is to wait for the PR check before merging.
 - **Docs examples copy in deprecated arguments.** The `aws_autoscaling_group` example uses `launch_configuration` (the 2009-era, now-deprecated predecessor of launch templates), `placement_group` and `force_delete`. Take only the arguments you need and check each one in the argument reference.
 
 ### Known limitations
