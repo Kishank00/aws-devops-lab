@@ -20,6 +20,7 @@ module "ec2" {
   subnet_ids            = module.network.private_subnet_ids
   alb_security_group_id = module.alb.security_group_id
   target_group_arns     = module.alb.target_group_arns
+  image_strategy        = var.image_strategy
 }
 
 module "alb" {
