@@ -6,7 +6,8 @@ A hands-on DevOps project. One real application, [linux-diagnostic-tool](https:/
 |---|---|---|
 | **1. Virtual machines** | EC2 + systemd + nginx, the classic "on-prem" way, fully automated | ✅ Done |
 | **2. Containers** | Docker image built by CI, stored in ECR, run on the same EC2 next to the VM version | ✅ Done |
-| **3. Scaling and high availability** | Auto Scaling Group across 2 AZs, self-healing, rolling replacement, immutable releases | ✅ Done: zero-downtime release and self-healing tested (rollout speed-up merged, to be measured) |
+| **3. Scaling and high availability** | Auto Scaling Group across 2 AZs, self-healing, rolling replacement, immutable releases | ✅ Done: zero-downtime release and self-healing tested |
+| **3b. Golden AMI** | Packer + Ansible bake the server software into an AMI; one variable switches between "fry" and "bake" | ✅ Done: release time down from 15 min 42 s to 6 min 28 s, 0 failed requests |
 | **4. Orchestration** | Kubernetes | 🔜 Planned |
 
 All infrastructure is Terraform. All deployments run through GitHub Actions with OIDC, so no AWS keys are stored anywhere.
@@ -28,6 +29,7 @@ Every finished phase is tagged with the same name in both repos, so the code of 
 | `phase-2-docker-ecr` | + the app as a Docker container from ECR on the same EC2, live tag in Parameter Store | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-2-docker-ecr) | [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool/tree/phase-2-docker-ecr) |
 | `phase-3-autoscaling-asg` | Auto Scaling Group across 2 AZs, instance refresh, immutable releases; servers configured at boot by user_data ("fry") | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-3-autoscaling-asg) | [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool/tree/phase-3-autoscaling-asg) |
 | `phase-3b-packer-ami-build` | Packer + Ansible template that bakes the server software into an AMI (not yet used by Terraform) | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-3b-packer-ami-build) | (no change) |
+| `phase-3b-packer-bake` | the ASG boots from the baked AMI with a short boot script; `image_strategy` switches back to fry | [aws-devops-lab](https://github.com/Kishank00/aws-devops-lab/tree/phase-3b-packer-bake) | (no change) |
 
 ---
 
@@ -55,6 +57,14 @@ Every finished phase is tagged with the same name in both repos, so the code of 
   - [Test results](#test-results)
   - [Lessons learned](#lessons-learned)
   - [Known limitations](#known-limitations-1)
+- [Phase 3b: Golden AMI (Packer + Ansible)](#phase-3b-golden-ami-packer--ansible)
+  - [Fry vs bake](#fry-vs-bake)
+  - [How the AMI is built](#how-the-ami-is-built)
+  - [What is baked, what runs at boot](#what-is-baked-what-runs-at-boot)
+  - [Switching between fry and bake](#switching-between-fry-and-bake)
+  - [Results](#results)
+  - [Lessons learned](#lessons-learned-1)
+  - [Known limitations](#known-limitations-2)
 - [Phase 4: Orchestration (Kubernetes)](#phase-4-orchestration-kubernetes)
 - [Repository layout](#repository-layout)
 - [Runbook](#runbook)
@@ -152,7 +162,7 @@ Covered in [Release pipeline: replace, don't patch](#release-pipeline-replace-do
 
 ### How the server sets itself up
 
-`modules/ec2/user_data.sh` runs once, on first boot. It does exactly what was first done by hand over SSM:
+In "fry" mode, `modules/ec2/user_data_fry.sh` runs once, on first boot. It does exactly what was first done by hand over SSM (in "bake" mode most of it moved into the AMI; see [Phase 3b](#what-is-baked-what-runs-at-boot)):
 
 | Step | What it does |
 |---|---|
@@ -478,7 +488,7 @@ Where the 15 minutes went:
 ~5 min    draining the old instances (300 s)    ← timer
 ```
 
-The timers were then cut to 300 s warmup and 30 s drain (see [Infrastructure changes](#infrastructure-changes-instance-refresh)), which should bring a release to about 6-7 minutes. Not measured yet.
+The timers were then cut to 300 s warmup and 30 s drain (see [Infrastructure changes](#infrastructure-changes-instance-refresh)), and the servers were switched to a baked AMI. The next release took 6 min 28 s (see [Phase 3b results](#results)).
 
 **2. Self-healing** (one instance terminated by hand in the console):
 
@@ -502,10 +512,117 @@ The timers were then cut to 300 s warmup and 30 s drain (see [Infrastructure cha
 ### Known limitations
 
 - **One NAT gateway, in AZ a.** If AZ a fails, the AZ b instance loses outbound internet (no ECR pulls, no apt), so replacements cannot boot. Production uses one NAT per AZ; here it would roughly double the NAT cost.
-- **Slow boots (fry, not bake).** Every server installs everything at boot, which takes 3-4 minutes and depends on apt, GitHub and ECR being reachable. A Packer-built AMI would boot in about a minute.
+- **Slow boots in fry mode.** Every server installs everything at boot, which takes 3-4 minutes and depends on apt, GitHub and ECR being reachable. *Addressed in [Phase 3b](#phase-3b-golden-ami-packer--ansible) with a baked AMI.*
 - **The VM version always deploys `master`.** New servers clone the latest `master`, not the commit that was tested, so the VM version is not pinned to a SHA the way the image is.
 - **No scaling policy yet.** The ASG self-heals and spreads across AZs but does not scale on load. A target tracking policy on CPU is planned.
 - **The rollback refresh is not watched.** If it also fails, it is only visible in the ASG console.
+
+---
+
+## Phase 3b: Golden AMI (Packer + Ansible)
+
+Goal: stop installing everything on every boot. Build the server software into an AMI once ("bake"), so new servers only do what changes per release.
+
+### Fry vs bake
+
+| | Fry (Phase 3) | Bake (Phase 3b) |
+|---|---|---|
+| Software installed | on **every boot**, by user_data | **once**, by `packer build` |
+| AMI | stock Ubuntu 24.04 | `sysdiag-base-<timestamp>`, built from that same Ubuntu |
+| Boot script | `user_data_fry.sh`, 129 lines | `user_data_bake.sh`, 24 lines |
+| Boot depends on | apt mirrors, GitHub, the uv installer, ECR | GitHub (pull) and ECR only |
+| Container equivalent | installing packages in the container's start command | `docker build`: the image already has everything |
+
+Both stay runnable: `image_strategy` in `environments/dev/terraform.tfvars` picks one.
+
+### How the AMI is built
+
+```
+packer build .   (from packer/, on a laptop, with the personal-sdk profile)
+  1. find the newest Canonical Ubuntu 24.04 AMI         (source_ami_filter, owner 099720109477)
+  2. launch a temporary t3.micro in the default VPC
+     with a temporary key pair and an SG open to SSH from this machine's IP only
+  3. shell:   cloud-init status --wait                  (otherwise apt is locked)
+  4. ansible: packer/ansible/playbook.yml               (Ansible runs on the laptop, over SSH)
+  5. stop the instance, snapshot the disk, register the AMI
+  6. terminate the instance, delete the key pair and SG
+→ ami-... named sysdiag-base-YYYYMMDD-hhmm, tagged BuiltBy=packer and BaseAMI=<Ubuntu AMI it started from>
+```
+
+The playbook is the fry script rewritten as idempotent Ansible tasks:
+
+| Bash (fry) | Ansible module |
+|---|---|
+| `apt-get update && apt-get install` | `apt` with `update_cache` and `cache_valid_time` |
+| `systemctl enable --now` | `systemd_service` (`enabled` + `started`) |
+| `useradd --system ...` | `user` |
+| `cat > file <<EOF` | `copy` with `content` (registry name from a play variable) |
+| `sudo -u sysdiag git clone` | `git` with `become_user: sysdiag` |
+| uv install, `uv sync` | `shell` / `command` with `creates:`, so a re-run skips them |
+| `ln -s`, `rm -f` for the nginx sites | `file` with `state: link` / `state: absent`, and a `Reload nginx` handler that runs once, only if a config changed |
+
+### What is baked, what runs at boot
+
+| Baked into the AMI | At boot (`user_data_bake.sh`) |
+|---|---|
+| nginx + its config, Docker, the ECR credential helper, AWS CLI | 1. wait for internet (the NAT may still be starting) |
+| the `sysdiag` service account, uv, the app code and its `.venv`, the systemd unit | 2. `deploy-sysdiag`: `git pull` + `uv sync` + restart, bringing the baked code up to the latest `master` (fast: dependencies are already installed) |
+| both deploy scripts | 3. read the image tag from Parameter Store and run `deploy-sysdiag-docker <tag>` |
+
+The rule: bake what is stable, do at boot what changes per release. The image tag changes with every release, so baking the container would mean a new AMI per release. Reading the tag at boot lets one AMI serve many releases.
+
+### Switching between fry and bake
+
+```hcl
+# modules/ec2/main.tf
+data "aws_ami" "sysdiag" {
+  count       = var.image_strategy == "bake" ? 1 : 0   # only look it up in bake mode
+  most_recent = true
+  owners      = ["self"]                                # only AMIs from this account
+  filter {
+    name   = "name"
+    values = ["sysdiag-base-*"]
+  }
+}
+
+resource "aws_launch_template" "app" {
+  image_id  = var.image_strategy == "bake" ? data.aws_ami.sysdiag[0].id : data.aws_ami.ubuntu.id
+  user_data = base64encode(file("${path.module}/user_data_${var.image_strategy}.sh"))
+  ...
+}
+```
+
+- `count = 0` in fry mode means the lookup never runs, so fry works even when no baked AMI exists.
+- The variable has a `validation` block, so a typo such as `"baked"` fails at plan time.
+- Changing the strategy (or building a newer AMI) creates a new launch template version, so the next apply rolls the servers over with an instance refresh.
+
+### Results
+
+Measured on 2026-10-24 with the dev environment, the ALB probed every 2 seconds:
+
+| | Fry, default timers | Bake, tuned timers |
+|---|---|---|
+| Boot (cloud-init "Up" time, fresh apply) | about 3-4 min to healthy | 134 s, of which about 35 s waiting for the new NAT |
+| Release (app push → instance refresh Successful) | 15 min 42 s | **6 min 28 s** |
+| Failed requests during the release | 0 of 400 | 0 of 190 |
+
+The release gain combines the baked AMI and the shorter timers (300 s warmup, 30 s drain), which were measured together. Most of the remaining 6 minutes is still timers: the 300 s warmup, plus the ALB marking a new target healthy (default: 5 checks 30 s apart).
+
+### Lessons learned
+
+- **Packer's amazon plugin could not read the `personal` profile.** The profile uses an `aws login` session (`login_session` in `~/.aws/config`), which the AWS CLI and the Terraform provider (aws-sdk-go-v2) understand but the plugin's older aws-sdk-go v1 credential chain does not ("No valid credential sources found"). A second profile, `personal-sdk`, with `credential_process = aws configure export-credentials --profile personal --format process`, bridges the two: every SDK understands `credential_process`.
+- **Wait for cloud-init before provisioning.** On first boot Ubuntu runs its own apt jobs; without `cloud-init status --wait`, Ansible's apt task can hit "Could not get lock /var/lib/dpkg/lock".
+- **`become_user` to a non-root user needs the `acl` package.** Ansible uses `setfacl` to let that user read its temporary module files.
+- **`use_proxy = false`** on the Ansible provisioner: the default SSH proxy breaks with modern OpenSSH and Ansible.
+- **Packer cleans up after itself.** It creates and deletes the temporary instance, key pair and security group; what stays is the AMI and its EBS snapshot (about $0.40 a month for 8 GB).
+
+### Known limitations
+
+- **The AMI is built by hand.** A CI pipeline (GitHub Actions + OIDC) on changes to `packer/` and on a weekly schedule would pick up Ubuntu security patches automatically.
+- **The newest AMI is used without review.** `most_recent` means a broken build would roll out on the next apply. The usual fix is a promotion tag: build as `Status=candidate`, test, tag `Status=approved`, and filter on that tag in Terraform.
+- **Old AMIs and their snapshots are not cleaned up.** Deregistering an AMI does not delete its snapshot, which keeps costing money.
+- **The live image tag resets on every new dev environment.** The parameter lives in the dev stack, so a fresh apply recreates it with its initial value until the next release. Moving it to `environments/shared` would keep it across teardowns.
+- **Hardcoded values remain** in `user_data_bake.sh` and the playbook (account ID, region, parameter name).
 
 ---
 
@@ -534,12 +651,16 @@ aws-devops-lab/
 │   └── github-app-deploy.tf    #   role for the app repo: ECR push, live-tag parameter, instance refresh
 ├── modules/                    # reusable building blocks
 │   ├── network/                #   VPC, subnets, IGW, NAT, routes
-│   ├── ec2/                    #   launch template, ASG, SG, IAM role, user_data.sh, image tag parameter
+│   ├── ec2/                    #   launch template, ASG, SG, IAM role, image tag parameter,
+│   │                           #   user_data_fry.sh (install everything) / user_data_bake.sh (short)
 │   ├── alb/                    #   load balancer, target groups, listeners (one per app version)
 │   └── ecr/                    #   container image repository
 ├── environments/
 │   ├── shared/                 # long-lived resources shared by all environments (ECR)
 │   └── dev/                    # wires the modules together; one folder per environment
+├── packer/
+│   ├── sysdiag.pkr.hcl         # builds the sysdiag-base-* AMI (amazon-ebs builder)
+│   └── ansible/playbook.yml    #   what gets installed into it
 └── .github/workflows/
     ├── terraform.yml           # fmt → validate → plan → (approval) → apply shared, then dev
     └── terraform-destroy.yml   # manual, confirmed, approved teardown of dev
@@ -561,6 +682,15 @@ terraform init
 terraform apply        # state bucket, OIDC provider, GitHub roles
 ```
 Then, in GitHub, create the environments **`shared`** and **`dev`**, each with a required reviewer, a deployment branch rule for `main`, and the variable `AWS_ROLE_ARN` set to the apply role's ARN.
+
+### Build the AMI (bake mode)
+Needs Packer and Ansible (`brew install hashicorp/tap/packer ansible`) and the `personal-sdk` profile (see [Lessons learned](#lessons-learned-1)).
+```bash
+cd packer
+packer init .
+packer build .        # ~8 min; prints the new ami-... at the end
+```
+Terraform picks up the newest `sysdiag-base-*` AMI on the next apply. To use the stock Ubuntu image with the full boot script instead, set `image_strategy = "fry"` in `environments/dev/terraform.tfvars`.
 
 ### Deploy
 Open a PR, wait for the `check` jobs and read the plan, then merge to `main` and approve the `apply (shared)` and `apply (dev)` jobs. The ASG launches 2 instances; about 4-5 minutes after the apply both are healthy. Get the URL with:
@@ -602,16 +732,18 @@ Never destroy `bootstrap/` (it holds the state of every environment) or `shared`
 | ASG keeps replacing instances | Boot takes longer than the grace period, or one target group stays unhealthy. Check the ASG **Activity** tab and cloud-init logs on a fresh instance. |
 | Instance refresh fails | `aws autoscaling describe-instance-refreshes --auto-scaling-group-name devops-lab-dev-asg`. The status reason usually names the instance that never became healthy. |
 | First apply: "Access denied ... AWSServiceRoleForAutoScaling" | IAM propagation of the newly created service-linked role. Re-run the failed apply job. See [Lessons learned](#lessons-learned). |
+| Plan fails: "Your query returned no results" on `data.aws_ami.sysdiag` | Bake mode, but no `sysdiag-base-*` AMI exists in the account. Run `packer build`, or set `image_strategy = "fry"`. |
+| `packer build`: "No valid credential sources found" | The profile in `sysdiag.pkr.hcl` must be `personal-sdk`, and `aws sts get-caller-identity --profile personal-sdk` must work (run `aws login --profile personal` if the session expired). |
 | `Error acquiring the state lock` | Make sure no pipeline or local run is active, then run `terraform force-unlock <LOCK_ID>` |
 
 ---
 
 ## Cost
 
-The NAT gateway, the ALB and the two t3.micro instances bill per hour (roughly $2.5/day together in ap-south-1), so the `dev` environment is created for a session and destroyed the same day. An instance refresh briefly doubles the instance count. The bootstrap stack (S3 + IAM) and the `shared` stack (ECR, about $0.10 per GB of images per month) cost close to nothing and stay up.
+The NAT gateway, the ALB and the two t3.micro instances bill per hour (roughly $2.5/day together in ap-south-1), so the `dev` environment is created for a session and destroyed the same day. An instance refresh briefly doubles the instance count. Each baked AMI keeps an 8 GB snapshot (about $0.40 a month), and a `packer build` costs a few minutes of t3.micro. The bootstrap stack (S3 + IAM) and the `shared` stack (ECR, about $0.10 per GB of images per month) cost close to nothing and stay up.
 
 ---
 
 ## Tech stack
 
-**Cloud:** AWS (VPC, EC2, Auto Scaling with launch templates and instance refresh, ALB, NAT, IAM, SSM Session Manager / Run Command / Parameter Store, ECR, S3) · **IaC:** Terraform (modules, layered state, `for_each`, `for` expressions, S3 remote state with native locking) · **CI/CD:** GitHub Actions, OIDC, environment approvals, immutable releases · **Server:** Ubuntu 24.04, systemd, nginx · **Containers:** Docker, ECR credential helper · **App:** Python 3.12, FastAPI, uvicorn, uv
+**Cloud:** AWS (VPC, EC2, Auto Scaling with launch templates and instance refresh, ALB, NAT, IAM, SSM Session Manager / Run Command / Parameter Store, ECR, S3) · **IaC:** Terraform (modules, layered state, `for_each`, `for` expressions, conditional `count`, variable validation, S3 remote state with native locking) · **Images:** Packer (amazon-ebs), Ansible · **CI/CD:** GitHub Actions, OIDC, environment approvals, immutable releases · **Server:** Ubuntu 24.04, systemd, nginx · **Containers:** Docker, ECR credential helper · **App:** Python 3.12, FastAPI, uvicorn, uv
