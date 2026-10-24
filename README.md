@@ -6,11 +6,12 @@ A hands-on DevOps project. One real application, [linux-diagnostic-tool](https:/
 |---|---|---|
 | **1. Virtual machines** | EC2 + systemd + nginx, the classic "on-prem" way, fully automated | ✅ Done |
 | **2. Containers** | Docker image built by CI, stored in ECR, run on the same EC2 next to the VM version | ✅ Done |
-| **3. Orchestration** | Kubernetes | 🔜 Planned |
+| **3. Scaling and high availability** | Auto Scaling Group across 2 AZs, self-healing, rolling replacement, immutable releases | 🚧 Infrastructure done and verified; immutable release pipeline written, not yet tested end to end |
+| **4. Orchestration** | Kubernetes | 🔜 Planned |
 
 All infrastructure is Terraform. All deployments run through GitHub Actions with OIDC, so no AWS keys are stored anywhere.
 
-Phases 1 and 2 run **side by side on the same server**, so the two approaches can be compared directly:
+Phases 1 and 2 run **side by side on every server**, so the two approaches can be compared directly:
 
 | URL | Version |
 |---|---|
@@ -30,11 +31,19 @@ Phases 1 and 2 run **side by side on the same server**, so the two approaches ca
 - [Phase 2: Containers (Docker)](#phase-2-containers-docker)
   - [Architecture](#architecture-1)
   - [What changed from Phase 1](#what-changed-from-phase-1)
-  - [Release pipeline](#release-pipeline)
+  - [Release pipeline (Phase 2 version)](#release-pipeline-phase-2-version)
   - [The live-version record](#the-live-version-record)
-  - [Rollback](#rollback)
   - [Known limitations](#known-limitations)
-- [Phase 3: Orchestration (Kubernetes)](#phase-3-orchestration-kubernetes)
+- [Phase 3: Scaling and high availability (ASG)](#phase-3-scaling-and-high-availability-asg)
+  - [Architecture](#architecture-2)
+  - [What changed from Phase 2](#what-changed-from-phase-2)
+  - [How the ASG keeps the app running](#how-the-asg-keeps-the-app-running)
+  - [Infrastructure changes: instance refresh](#infrastructure-changes-instance-refresh)
+  - [Release pipeline: replace, don't patch](#release-pipeline-replace-dont-patch)
+  - [Rollback](#rollback)
+  - [Lessons learned](#lessons-learned)
+  - [Known limitations](#known-limitations-1)
+- [Phase 4: Orchestration (Kubernetes)](#phase-4-orchestration-kubernetes)
 - [Repository layout](#repository-layout)
 - [Runbook](#runbook)
 - [Cost](#cost)
@@ -74,6 +83,8 @@ Phases 1 and 2 run **side by side on the same server**, so the two approaches ca
 
 Request path: `browser → ALB → nginx → FastAPI app`
 
+In Phases 1 and 2 this was a single `aws_instance`. Phase 3 replaced it with an Auto Scaling Group; the server itself is configured exactly the same way.
+
 ### What is built
 
 Everything below is Terraform, organised as reusable modules that an environment folder wires together.
@@ -81,8 +92,8 @@ Everything below is Terraform, organised as reusable modules that an environment
 | Module | Resources |
 |---|---|
 | `modules/network` | VPC, 2 public + 2 private subnets across 2 AZs, internet gateway, NAT gateway, route tables. Subnets are created from lists (`count`), so adding an AZ is a tfvars change. |
-| `modules/ec2` | Ubuntu 24.04 instance in a private subnet, security group (inbound only from the ALB), IAM role + instance profile, boot script (`user_data.sh`), and the live image tag parameter (Phase 2). |
-| `modules/alb` | Internet-facing Application Load Balancer, its security group, and one target group, listener and attachment per app version, all generated from one map (`local.app_ports`). |
+| `modules/ec2` | Launch template (Ubuntu 24.04, boot script `user_data.sh`) and an Auto Scaling Group across the private subnets (Phase 3), security group (inbound only from the ALB), IAM role + instance profile, and the live image tag parameter (Phase 2). |
+| `modules/alb` | Internet-facing Application Load Balancer, its security group, and one target group and listener per app version, all generated from one map (`local.app_ports`). It outputs the target group ARNs for the ASG. |
 | `modules/ecr` | One private ECR repository with immutable tags and scan on push (Phase 2). |
 
 Terraform is split into **layers**, each with its own state file, by how long the resources live:
@@ -93,7 +104,10 @@ Terraform is split into **layers**, each with its own state file, by how long th
 | `environments/shared` | ECR repositories (`for_each` over app names) | long-lived, survives env teardowns | pipeline |
 | `environments/dev` | network, ec2, alb | created for a session, destroyed the same day | pipeline |
 
-`environments/dev` calls the modules and passes outputs between them. Network IDs go into ec2 and alb, the instance ID goes into alb, and the ALB security group ID goes into ec2.
+`environments/dev` calls the modules and passes outputs between them:
+- network → ec2: VPC ID and the private subnet IDs;
+- network → alb: VPC ID and the public subnet IDs;
+- alb → ec2: the ALB security group ID and the target group ARNs.
 
 Roles in `bootstrap/`:
 
@@ -101,7 +115,7 @@ Roles in `bootstrap/`:
 |---|---|---|
 | `github-actions-terraform` | read-only, for `plan` | any branch or PR of this repo |
 | `github-actions-terraform-apply` | admin, for `apply`/`destroy` | only jobs in the approved `dev` or `shared` GitHub environments |
-| `github-actions-app-deploy` | SSM commands on the instance tagged `devops-lab-dev-diagnostic`, push to the `linux-diagnostic-tool` ECR repo, write the one live-tag parameter | only the `master` branch of the **app repo** |
+| `github-actions-app-deploy` | push to the `linux-diagnostic-tool` ECR repo, read and write the one live-tag parameter, start, cancel and watch an instance refresh on `devops-lab-dev-asg` only (plus SSM commands on instances tagged `devops-lab-dev-diagnostic`, from Phase 2) | only the `master` branch of the **app repo** |
 
 ### CI/CD pipelines
 
@@ -122,7 +136,7 @@ Started manually. You pick the environment and type `destroy` to confirm, and it
 
 **3. Application: `ci.yaml` in [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool)**
 
-Covered in [Release pipeline](#release-pipeline). It deploys both versions on every push to `master`.
+Covered in [Release pipeline: replace, don't patch](#release-pipeline-replace-dont-patch). Every push to `master` replaces all servers with fresh ones running the new version.
 
 ### How the server sets itself up
 
@@ -142,7 +156,7 @@ Covered in [Release pipeline](#release-pipeline). It deploys both versions on ev
 | 9 | Installs `/usr/local/bin/deploy-sysdiag-docker <tag>`, the release script for the Docker version. |
 | 10 | Reads the live image tag from Parameter Store and starts the container with `deploy-sysdiag-docker`. |
 
-Because the instance sets `user_data_replace_on_change = true`, any change to this script replaces the server on the next apply. App releases do **not** replace the server; they go through the deploy scripts.
+A full boot takes about 3-4 minutes. Since Phase 3, a change to this script creates a new **launch template version**, and an instance refresh rolls it out (see [Infrastructure changes](#infrastructure-changes-instance-refresh)).
 
 ### Security highlights
 
@@ -150,12 +164,13 @@ Because the instance sets `user_data_replace_on_change = true`, any change to th
 - **Least privilege per pipeline:**
   - plan is read-only
   - apply is gated by a manual approval
-  - the app pipeline can only target one tagged instance, push to one ECR repo and write one parameter
-- **No SSH.** Port 22 is closed, there are no key pairs, and the instance has no public IP. Access is SSM only, controlled by IAM.
+  - the app pipeline can only push to one ECR repo, write one parameter and refresh one ASG
+- **No SSH.** Port 22 is closed, there are no key pairs, and the instances have no public IP. Access is SSM only, controlled by IAM.
 - **Layered network:**
-  - the instance accepts traffic only from the ALB's security group
+  - the instances accept traffic only from the ALB's security group
   - both app versions listen only on `127.0.0.1`; nginx is the only way in
 - **Non-root app.** The VM app runs as a dedicated service account, and the container runs as uid 10001. The deploy scripts live in a root-owned path, so the app cannot modify them.
+- **No secrets in user_data.** It is only base64-encoded (readable by anyone with EC2 describe rights and by any process on the instance), so it holds pointers such as a parameter name, never passwords.
 - **Account guard.** `allowed_account_ids` in the provider stops Terraform from ever running against the wrong AWS account.
 - **State protection.** The state bucket is versioned and encrypted, and its lock file prevents concurrent writes.
 
@@ -211,16 +226,18 @@ Each version has its own target group, so each is health checked on its own. If 
 
 New infrastructure for this phase:
 - `modules/ecr` + `environments/shared`: the ECR repository, with **immutable tags** (a tag can never be overwritten) and **scan on push**.
-- `modules/alb`: a second listener, target group and attachment (port 8080), generated from the same map as port 80.
+- `modules/alb`: a second listener and target group (port 8080), generated from the same map as port 80.
 - `modules/ec2`:
   - `AmazonEC2ContainerRegistryReadOnly` on the instance role
   - port 8080 from the ALB
   - the live image tag parameter
 - `bootstrap/github-app-deploy.tf`: the app pipeline may push to the one repository and write the one parameter.
 
-### Release pipeline
+### Release pipeline (Phase 2 version)
 
-`ci.yaml` in the app repo, on every push to `master`:
+> Replaced in Phase 3 by [replace, don't patch](#release-pipeline-replace-dont-patch). Kept here because it shows the "patch in place" approach that Phase 3 moves away from.
+
+With one server, the app CI **patched** it in place over SSM Run Command:
 
 ```
 test-and-build ──┬──► deploy-ec2          VM version:  SSM → deploy-sysdiag
@@ -240,12 +257,14 @@ test-and-build ──┬──► deploy-ec2          VM version:  SSM → deplo
 
 The image is tagged with the **commit SHA**, never `latest`, so every running container can be traced to the exact code it was built from.
 
+The two deploy scripts are still installed on every server, as an emergency tool: `sudo deploy-sysdiag-docker <sha>` from an SSM session swaps the container on that one server.
+
 ### The live-version record
 
-`/devops-lab-dev/sysdiag/image-tag` in SSM Parameter Store holds **the last version that passed its health check**.
+`/devops-lab-dev/sysdiag/image-tag` in SSM Parameter Store holds **the version every server should run**.
 
-- **The CI writes it** as the last step of a release. A failed deploy never reaches that step, so the record keeps pointing at the last good version.
-- **A new server reads it** at boot (user_data step 10), so a replaced instance comes up on the current release, not on whatever tag was written in the code.
+- **A new server reads it** at boot (user_data step 10), so a scale-out or replacement instance comes up on the current release, not on whatever tag was written in the code. With an Auto Scaling Group (Phase 3) this happens all the time, which is why the record exists.
+- **The CI writes it.** In Phase 2 it was written *after* a successful deploy. In Phase 3 it is written *before* the instance refresh, because the new servers must read it at boot, and the CI puts the old value back if the release fails.
 - **Terraform creates it** with an initial value and then ignores later changes to it (`lifecycle { ignore_changes = [value] }`), so an apply never rolls the version back.
 - Its **History** tab is a free deploy log: every version, when it was set, and by which role.
 
@@ -255,42 +274,197 @@ What brings the app back in each case:
 |---|---|---|---|
 | App crashes | no | Docker restart policy | same container |
 | Server reboots | no | dockerd (systemd) + restart policy | same container |
-| New or replacement server | yes | Parameter Store → `deploy-sysdiag-docker` | last good tag |
-
-### Rollback
-
-1. Find the previous good tag:
-   ```bash
-   aws ssm get-parameter-history --name /devops-lab-dev/sysdiag/image-tag \
-     --query 'Parameters[].[Version,Value,LastModifiedUser]' --output table
-   ```
-2. Run it on the server (from an SSM session):
-   ```bash
-   sudo deploy-sysdiag-docker <previous sha>
-   ```
-3. Update the record from your laptop. A rollback isn't finished until the record matches what is running, otherwise the next new server boots the bad version:
-   ```bash
-   aws ssm put-parameter --name /devops-lab-dev/sysdiag/image-tag --value <previous sha> --overwrite
-   ```
+| Server fails its health check | yes, on the replacement | ASG launches a new server, which reads Parameter Store | current tag |
+| New server (scale-out, refresh) | yes | Parameter Store → `deploy-sysdiag-docker` | current tag |
 
 ### Known limitations
 
-- **A few seconds of downtime per release.** The old container is removed before the new one starts. Zero downtime needs two copies and a switch-over (blue/green behind nginx, or Kubernetes rolling updates in Phase 3).
-- **One server.** A release or a replacement takes the app down briefly. Multi-AZ with an Auto Scaling Group is the next step.
+- **A few seconds of downtime per release.** The old container is removed before the new one starts. *Fixed in Phase 3: releases now replace servers, and the ALB drains the old ones first.*
+- **One server.** *Fixed in Phase 3: two servers in two AZs.*
 - **Hardcoded values in `user_data.sh`**: the account ID and the parameter name. They should be passed in from Terraform (`templatefile`).
 - **Base image CVEs.** ECR scanning reports HIGH findings in Debian packages of `python:3.12-slim` (glibc, zlib), not in the app code.
 
 ---
 
-## Phase 3: Orchestration (Kubernetes)
+## Phase 3: Scaling and high availability (ASG)
+
+Goal: no single server and no single AZ. A dead server is replaced automatically, and both infrastructure changes and app releases roll out with zero downtime.
+
+### Architecture
+
+```
+                              Internet
+                                 │
+                      ┌──────────▼───────────┐
+                      │  ALB (AZ a + b)      │  :80 → tg "vm"   :8080 → tg "docker"
+                      └───┬──────────────▲───┘
+            traffic       │              │ ASG registers / deregisters
+                          │              │ instances automatically
+          ap-south-1a     │              │                 ap-south-1b
+   ┌──────────────────────▼───┐      ┌───┴──────────────────────────┐
+   │ private subnet 10.0.2.0  │      │ private subnet 10.0.4.0      │
+   │  ┌────────────────────┐  │      │  ┌────────────────────┐      │
+   │  │ instance           │  │      │  │ instance           │      │
+   │  │ nginx, VM app,     │  │      │  │ nginx, VM app,     │      │
+   │  │ container          │  │      │  │ container          │      │
+   │  └────────────────────┘  │      │  └────────────────────┘      │
+   └────────────▲─────────────┘      └─────────────▲────────────────┘
+                │                                  │
+            ┌───┴──────────────────────────────────┴───┐
+            │  Auto Scaling Group  devops-lab-dev-asg  │  min 2 / desired 2 / max 4
+            │  health check: ELB (/health on 80 + 8080)│  grace period 600 s
+            └───────────────────┬──────────────────────┘
+                                │ launches from
+                    ┌───────────▼────────────┐
+                    │ Launch template (vN)   │  AMI, t3.micro, SG, IAM role,
+                    └────────────────────────┘  user_data, Name tag
+```
+
+The ALB never talks to the ASG. Traffic goes ALB → target group → instances; the ASG only keeps the target groups' instance list correct.
+
+### What changed from Phase 2
+
+| | Phase 2 | Phase 3 |
+|---|---|---|
+| Servers | one `aws_instance` in AZ a | `aws_launch_template` + `aws_autoscaling_group`, 2 instances, one per AZ |
+| Subnets passed to ec2 | `private_subnet_ids[0]` | all private subnets (`subnet_ids`) |
+| Target group registration | `aws_lb_target_group_attachment` with a fixed instance ID | the ASG registers each instance it launches (`target_group_arns`) |
+| A server dies | the site is down until someone runs Terraform | the ASG replaces it |
+| An AZ goes down | the site is down | the other AZ keeps serving; the ASG relaunches there |
+| user_data change | instance destroyed, then created (downtime) | new template version, instance refresh (no downtime) |
+| App release | SSM patches the running server | servers are replaced by fresh ones (immutable) |
+
+Kubernetes equivalents, for orientation:
+
+| AWS | Kubernetes |
+|---|---|
+| launch template | pod template |
+| ASG + desired capacity | ReplicaSet + replicas |
+| spreading over subnets in 2 AZs | topology spread constraints on zones |
+| ELB health check + replacement | liveness probe + restart |
+| health check grace period | `initialDelaySeconds` |
+| target group registration | Service endpoints |
+| instance refresh | Deployment rolling update |
+
+### How the ASG keeps the app running
+
+The ASG is a control loop: it compares healthy instances with the desired count and fixes the difference.
+
+```
+healthy == desired (2)?  ── yes ──► check again
+        │ no
+        ▼
+  pick the AZ with the fewest instances
+  launch from the launch template
+  register in both target groups
+  wait for the grace period (600 s), then trust the ALB health check
+        healthy   → keep
+        unhealthy → deregister, terminate, launch a replacement
+```
+
+- **AZ balance.** Each subnet lives in one AZ, so two subnets give the ASG two AZs. It launches into the AZ with the fewest instances. If an AZ cannot take an instance, it launches in the other one and rebalances later.
+- **Health check type `ELB`.** The default (`EC2`) only checks that the VM is powered on. `ELB` uses the target groups' `/health` checks, so a broken app gets its server replaced too. An instance must be healthy in **both** target groups.
+- **Grace period 600 s.** user_data takes 3-4 minutes. Without a grace period, the ASG would see a booting server as unhealthy, kill it, and loop forever.
+
+### Infrastructure changes: instance refresh
+
+```hcl
+launch_template {
+  id      = aws_launch_template.app.id
+  version = aws_launch_template.app.latest_version   # not "$Latest"
+}
+instance_refresh {
+  strategy = "Rolling"
+  preferences {
+    min_healthy_percentage = 100   # never fewer than 2 healthy (maxUnavailable: 0)
+    max_healthy_percentage = 200   # may run 4 during the refresh (maxSurge: 100%)
+  }
+}
+```
+
+1. A change to the launch template (for example `user_data.sh`) creates a **new version** (`update_default_version = true`).
+2. Because the ASG references `latest_version` (a number Terraform can see change), the plan updates the ASG and Terraform starts an **instance refresh**. With `"$Latest"`, Terraform would see no change and the running servers would stay on the old version.
+3. With 100/200, the refresh **launches new instances first**, waits until they are healthy, then terminates the old ones. Capacity never drops.
+
+```
+start:   [v1] [v1]
+step 1:  [v1] [v1] [v2…] [v2…]   launch new (up to 200%)
+step 2:  [v1] [v1] [v2✓] [v2✓]   new ones pass /health
+step 3:            [v2✓] [v2✓]   old ones drained and terminated
+```
+
+### Release pipeline: replace, don't patch
+
+> 🚧 Written, not yet tested end to end.
+
+There are two ways to put a new version on servers: **patch** them (Phase 2, Ansible, SSM) or **replace** them with fresh ones (Kubernetes, Spinnaker, CodeDeploy blue/green). Phase 3 replaces. Every server is then fresh and identical, the ALB drains old servers so no request fails, and nothing drifts.
+
+The app version is not in the launch template. The template says "read the tag from Parameter Store", so a release only changes the parameter and replaces the servers. No Terraform runs for an app release.
+
+`ci.yaml` in the app repo, on every push to `master`:
+
+```
+test-and-build ──► publish-ecr ──► deploy-asg
+ (pytest,          (build + push    1. read the live tag     (kept for rollback)
+  docker build)     :<git sha>)     2. write the new tag     (new servers read it at boot)
+                                    3. start-instance-refresh (100/200)
+                                    4. poll every 30 s until Successful / Failed (30 min max)
+                                    5. on failure: restore the old tag, cancel the refresh,
+                                       start a rollback refresh
+```
+
+- One job updates **both** versions: new servers clone `master` (VM version) and pull the tagged image (Docker version) at boot.
+- The CI passes the 100/200 preferences itself. The `instance_refresh` block in Terraform only applies to refreshes that Terraform starts; a refresh started from the CLI would otherwise use the AWS default (90%), which terminates one of the two servers first.
+- The job runs in a `deploy-asg` concurrency group that never cancels a running deploy, so two refreshes never overlap.
+- A release takes several minutes, because every server boots from scratch. Baking the app into an AMI (Packer) is the planned fix.
+
+### Rollback
+
+**Automatic:** if the refresh fails or times out, the CI restores the previous tag in Parameter Store, cancels the refresh and starts a new one, so every server comes back on the old version. The CI job is still marked failed, and it does not wait for the rollback refresh to finish.
+
+**Manual:**
+1. Find the previous good tag:
+   ```bash
+   aws ssm get-parameter-history --name /devops-lab-dev/sysdiag/image-tag \
+     --query 'Parameters[].[Version,Value,LastModifiedUser]' --output table
+   ```
+2. Point the record at it:
+   ```bash
+   aws ssm put-parameter --name /devops-lab-dev/sysdiag/image-tag --value <previous sha> --overwrite
+   ```
+3. Replace the servers so they boot that version:
+   ```bash
+   aws autoscaling start-instance-refresh --auto-scaling-group-name devops-lab-dev-asg \
+     --preferences '{"MinHealthyPercentage":100,"MaxHealthyPercentage":200}'
+   ```
+
+**Emergency (one server, seconds instead of minutes):** from an SSM session, `sudo deploy-sysdiag-docker <previous sha>`. This patches only that server, so finish with steps 2 and 3, or the next new server boots the bad version.
+
+### Lessons learned
+
+- **The first ASG in an account can fail with "Access denied when attempting to assume role AWSServiceRoleForAutoScaling".** AWS creates that service-linked role on the first `CreateAutoScalingGroup`, and IAM takes a minute or two to make a new role usable. The ASG retried on its own and launched both instances, but Terraform had already seen the failed launches and marked the ASG as tainted. Re-running the apply replaced it cleanly. This happens once per account.
+- **ALB fails open.** While the containers were still starting, every target in the `docker` group was unhealthy, yet `:8080/health` already answered. When all targets in a group are unhealthy, the ALB sends traffic to all of them anyway.
+- **Docs examples copy in deprecated arguments.** The `aws_autoscaling_group` example uses `launch_configuration` (the 2009-era, now-deprecated predecessor of launch templates), `placement_group` and `force_delete`. Take only the arguments you need and check each one in the argument reference.
+
+### Known limitations
+
+- **One NAT gateway, in AZ a.** If AZ a fails, the AZ b instance loses outbound internet (no ECR pulls, no apt), so replacements cannot boot. Production uses one NAT per AZ; here it would roughly double the NAT cost.
+- **Slow boots (fry, not bake).** Every server installs everything at boot, which takes 3-4 minutes and depends on apt, GitHub and ECR being reachable. A Packer-built AMI would boot in about a minute.
+- **The VM version always deploys `master`.** New servers clone the latest `master`, not the commit that was tested, so the VM version is not pinned to a SHA the way the image is.
+- **No scaling policy yet.** The ASG self-heals and spreads across AZs but does not scale on load. A target tracking policy on CPU is planned.
+- **The rollback refresh is not watched.** If it also fails, it is only visible in the ASG console.
+
+---
+
+## Phase 4: Orchestration (Kubernetes)
 
 > 🔜 **Planned.** This section will be filled in when the phase is built.
 
-Goal: several copies of the app across AZs, zero-downtime rolling updates, self-healing, and Ingress-based routing.
+Goal: run the same app on EKS, where rolling updates, self-healing and service discovery are built into the platform instead of assembled from ASG, ALB and SSM.
 
-<!-- Phase 3 sections, to add here:
+<!-- Phase 4 sections, to add here:
 ### Architecture
-### What changed from Phase 2
+### What changed from Phase 3
 ### CI/CD pipeline
 ### How to run
 -->
@@ -304,10 +478,10 @@ aws-devops-lab/
 ├── bootstrap/                  # one-time, long-lived: state bucket + GitHub OIDC roles (never destroy)
 │   ├── main.tf                 #   S3 state bucket
 │   ├── github-oidc.tf          #   OIDC provider, plan + apply roles for this repo
-│   └── github-app-deploy.tf    #   role for the app repo: SSM deploy, ECR push, live-tag parameter
+│   └── github-app-deploy.tf    #   role for the app repo: ECR push, live-tag parameter, instance refresh
 ├── modules/                    # reusable building blocks
 │   ├── network/                #   VPC, subnets, IGW, NAT, routes
-│   ├── ec2/                    #   instance, SG, IAM role, user_data.sh, image tag parameter
+│   ├── ec2/                    #   launch template, ASG, SG, IAM role, user_data.sh, image tag parameter
 │   ├── alb/                    #   load balancer, target groups, listeners (one per app version)
 │   └── ecr/                    #   container image repository
 ├── environments/
@@ -336,19 +510,27 @@ terraform apply        # state bucket, OIDC provider, GitHub roles
 Then, in GitHub, create the environments **`shared`** and **`dev`**, each with a required reviewer, a deployment branch rule for `main`, and the variable `AWS_ROLE_ARN` set to the apply role's ARN.
 
 ### Deploy
-Push to `main` and approve the `apply (shared)` and `apply (dev)` jobs, or re-run the latest workflow run. About 3-4 minutes later the app is live. Get the URL with:
+Open a PR, wait for the `check` jobs and read the plan, then merge to `main` and approve the `apply (shared)` and `apply (dev)` jobs. The ASG launches 2 instances; about 4-5 minutes after the apply both are healthy. Get the URL with:
 ```bash
 cd environments/dev
 terraform output -raw alb_dns_name
 ```
 Then open `http://<alb-dns>/docs` (VM version) and `http://<alb-dns>:8080/docs` (Docker version).
 
-### Connect to the server
+### Check the instances
 ```bash
-aws ssm start-session --target $(terraform output -raw instance_id)
+aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names devops-lab-dev-asg \
+  --query 'AutoScalingGroups[0].Instances[].[InstanceId,AvailabilityZone,LifecycleState,HealthStatus]' \
+  --output table
 ```
 
-### Roll back the Docker version
+### Connect to a server
+Instance IDs change whenever the ASG replaces a server, so take one from the command above:
+```bash
+aws ssm start-session --target <instance-id>
+```
+
+### Roll back
 See [Rollback](#rollback).
 
 ### Destroy
@@ -364,16 +546,19 @@ Never destroy `bootstrap/` (it holds the state of every environment) or `shared`
 | Docker app down | `sudo docker ps -a` and `sudo docker logs sysdiag` |
 | `deploy-sysdiag-docker` fails on pull | image tag exists in ECR? instance role has ECR read? `/root/.docker/config.json` has the credential helper? |
 | ALB returns 502/503 | Target group health in the console. Each version's health check calls `/health` through nginx on its own port. |
+| ASG keeps replacing instances | Boot takes longer than the grace period, or one target group stays unhealthy. Check the ASG **Activity** tab and cloud-init logs on a fresh instance. |
+| Instance refresh fails | `aws autoscaling describe-instance-refreshes --auto-scaling-group-name devops-lab-dev-asg`. The status reason usually names the instance that never became healthy. |
+| First apply: "Access denied ... AWSServiceRoleForAutoScaling" | IAM propagation of the newly created service-linked role. Re-run the failed apply job. See [Lessons learned](#lessons-learned). |
 | `Error acquiring the state lock` | Make sure no pipeline or local run is active, then run `terraform force-unlock <LOCK_ID>` |
 
 ---
 
 ## Cost
 
-The NAT gateway and ALB bill per hour (roughly $2/day together in ap-south-1), so the `dev` environment is created for a session and destroyed the same day. The bootstrap stack (S3 + IAM) and the `shared` stack (ECR, about $0.10 per GB of images per month) cost close to nothing and stay up.
+The NAT gateway, the ALB and the two t3.micro instances bill per hour (roughly $2.5/day together in ap-south-1), so the `dev` environment is created for a session and destroyed the same day. An instance refresh briefly doubles the instance count. The bootstrap stack (S3 + IAM) and the `shared` stack (ECR, about $0.10 per GB of images per month) cost close to nothing and stay up.
 
 ---
 
 ## Tech stack
 
-**Cloud:** AWS (VPC, EC2, ALB, NAT, IAM, SSM Session Manager / Run Command / Parameter Store, ECR, S3) · **IaC:** Terraform (modules, layered state, `for_each`, S3 remote state with native locking) · **CI/CD:** GitHub Actions, OIDC, environment approvals · **Server:** Ubuntu 24.04, systemd, nginx · **Containers:** Docker, ECR credential helper · **App:** Python 3.12, FastAPI, uvicorn, uv
+**Cloud:** AWS (VPC, EC2, Auto Scaling with launch templates and instance refresh, ALB, NAT, IAM, SSM Session Manager / Run Command / Parameter Store, ECR, S3) · **IaC:** Terraform (modules, layered state, `for_each`, `for` expressions, S3 remote state with native locking) · **CI/CD:** GitHub Actions, OIDC, environment approvals, immutable releases · **Server:** Ubuntu 24.04, systemd, nginx · **Containers:** Docker, ECR credential helper · **App:** Python 3.12, FastAPI, uvicorn, uv

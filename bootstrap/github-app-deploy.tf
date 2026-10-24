@@ -74,9 +74,26 @@ data "aws_iam_policy_document" "app_deploy" {
 
   # 6. Record the live image tag after a successful deploy
   statement {
-    actions   = ["ssm:PutParameter"]
+    actions   = ["ssm:GetParameter", "ssm:PutParameter"]
     resources = ["arn:aws:ssm:ap-south-1:${data.aws_caller_identity.current.account_id}:parameter/devops-lab-dev/sysdiag/image-tag"]
   }
+
+  # 7. Roll out a release by replacing the ASG instances
+  statement {
+    actions = [
+      "autoscaling:StartInstanceRefresh",
+      "autoscaling:CancelInstanceRefresh",
+    ]
+    resources = ["arn:aws:autoscaling:ap-south-1:${data.aws_caller_identity.current.account_id}:autoScalingGroup:*:autoScalingGroupName/devops-lab-dev-asg"]
+  }
+
+  # 8. Watch the refresh progress (read-only, no resource-level support)
+  statement {
+    actions   = ["autoscaling:DescribeInstanceRefreshes"]
+    resources = ["*"]
+  }
+
+
 }
 
 resource "aws_iam_role_policy" "app_deploy" {
