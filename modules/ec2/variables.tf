@@ -3,9 +3,9 @@ variable "vpc_id" {
   type        = string
 }
 
-variable "subnet_id" {
-  description = "ID of the Subnet to create the EC2 resources in"
-  type        = string
+variable "subnet_ids" {
+  description = "IDs of the private subnets the ASG launches instances in, one per AZ"
+  type        = list(string)
 }
 
 variable "name" {
@@ -20,6 +20,11 @@ variable "instance_type" {
 }
 
 variable "alb_security_group_id" {
-  description = "ID of the ALB security group allowed to reach the instance on port 80"
+  description = "ID of the ALB security group allowed to reach the instances on ports 80 and 8080"
   type        = string
+}
+
+variable "target_group_arns" {
+  description = "ARNs of the ALB target groups the ASG registers its instances in"
+  type        = list(string)
 }

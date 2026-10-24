@@ -34,19 +34,51 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-resource "aws_instance" "linux_diagnostic_tool" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type
-  subnet_id                   = var.subnet_id
-  vpc_security_group_ids      = [aws_security_group.ec2.id]
-  iam_instance_profile        = aws_iam_instance_profile.ec2.name
-  user_data_replace_on_change = true
-  depends_on                  = [aws_iam_role_policy_attachment.this, aws_ssm_parameter.image_tag]
-  user_data                   = file("${path.module}/user_data.sh")
-  tags = {
-    Name = "${var.name}-diagnostic"
+resource "aws_launch_template" "app" {
+  name_prefix            = "${var.name}-app-"
+  image_id               = data.aws_ami.ubuntu.id
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [aws_security_group.ec2.id]
+  user_data              = base64encode(file("${path.module}/user_data.sh"))
+  update_default_version = true
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2.name
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "${var.name}-diagnostic"
+    }
   }
 }
+
+
+resource "aws_autoscaling_group" "app" {
+  name                      = "${var.name}-asg"
+  vpc_zone_identifier       = var.subnet_ids
+  max_size                  = 4
+  min_size                  = 2
+  health_check_grace_period = 600
+  health_check_type         = "ELB"
+  desired_capacity          = 2
+  target_group_arns         = var.target_group_arns
+  launch_template {
+    id      = aws_launch_template.app.id
+    version = aws_launch_template.app.latest_version
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 100
+      max_healthy_percentage = 200
+    }
+  }
+  depends_on = [aws_iam_role_policy_attachment.this, aws_ssm_parameter.image_tag]
+}
+
 
 data "aws_iam_policy_document" "ec2_trust" {
   statement {

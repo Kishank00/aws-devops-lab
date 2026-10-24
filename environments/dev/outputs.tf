@@ -18,9 +18,9 @@ output "private_subnet_ids" {
   value       = module.network.private_subnet_ids
 }
 
-output "instance_id" {
-  description = "ID of the EC2 instance"
-  value       = module.ec2.instance_id
+output "asg_name" {
+  description = "Name of the app Auto Scaling Group"
+  value       = module.ec2.asg_name
 }
 
 output "alb_dns_name" {

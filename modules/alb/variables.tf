@@ -12,8 +12,3 @@ variable "public_subnet_ids" {
   description = "IDs of the public subnets to place the ALB in (at least 2 AZs)"
   type        = list(string)
 }
-
-variable "instance_id" {
-  description = "ID of the EC2 instance to attach to the target group"
-  type        = string
-}
