@@ -54,7 +54,6 @@ resource "aws_launch_template" "app" {
   }
 }
 
-
 resource "aws_autoscaling_group" "app" {
   name                      = "${var.name}-asg"
   vpc_zone_identifier       = var.subnet_ids
