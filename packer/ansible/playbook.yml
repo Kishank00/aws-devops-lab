@@ -1,0 +1,186 @@
+---
+- name: Bake the sysdiag base image
+  hosts: all
+  become: true
+
+  vars:
+    ecr_registry: 286590629524.dkr.ecr.ap-south-1.amazonaws.com
+
+  tasks:
+    - name: Install nginx, Docker and the ECR credential helper
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - docker.io
+          - amazon-ecr-credential-helper
+          - acl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Start Docker on boot
+      ansible.builtin.systemd_service:
+        state: started
+        name: docker
+        enabled: true
+
+    - name: Create root's Docker config directory
+      ansible.builtin.file:
+        path: /root/.docker
+        state: directory
+        mode: "0700"
+
+    - name: Let Docker pull from ECR with the instance role
+      ansible.builtin.copy:
+        dest: /root/.docker/config.json
+        mode: "0600"
+        content: |
+          {
+            "credHelpers": {
+              "{{ ecr_registry }}": "ecr-login"
+            }
+          }
+
+    - name: Create a user 'sysdiag' with a home directory
+      ansible.builtin.user:
+        name: sysdiag
+        create_home: true
+        system: true
+        home: "/opt/sysdiag"
+        shell: /usr/sbin/nologin
+
+    - name: Clone the app as the sysdiag user
+      become: true
+      become_user: sysdiag
+      ansible.builtin.git:
+        repo: 'https://github.com/Kishank00/linux-diagnostic-tool.git'
+        dest: '/opt/sysdiag/app'
+        version: master
+
+    - name: Install uv for the sysdiag user
+      become: true
+      become_user: sysdiag
+      ansible.builtin.shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+      args:
+        creates: /opt/sysdiag/.local/bin/uv
+
+    - name: Install the app's locked dependencies into its .venv
+      become: true
+      become_user: sysdiag
+      ansible.builtin.command: /opt/sysdiag/.local/bin/uv --directory /opt/sysdiag/app sync --locked --no-dev
+      args:
+        creates: /opt/sysdiag/app/.venv
+
+    - name: Install the systemd unit for the VM app
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/sysdiag.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Linux Diagnostic Tool API
+          After=network.target
+
+          [Service]
+          User=sysdiag
+          Group=sysdiag
+          WorkingDirectory=/opt/sysdiag/app
+          ExecStart=/opt/sysdiag/app/.venv/bin/uvicorn sysdiag.api.main:app --host 127.0.0.1 --port 8000
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start the VM app on boot
+      ansible.builtin.systemd_service:
+        name: sysdiag
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Configure nginx (80 -> VM app, 8080 -> container)
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/sysdiag
+        mode: "0644"
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+          }
+
+          server {
+              listen 8080;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8001;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+          }
+      notify: Reload nginx
+
+    - name: Enable the sysdiag site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/sysdiag
+        dest: /etc/nginx/sites-enabled/sysdiag
+        state: link
+      notify: Reload nginx
+
+    - name: Disable the default site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Start nginx on boot
+      ansible.builtin.systemd_service:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Install the release script for the VM version
+      ansible.builtin.copy:
+        dest: /usr/local/bin/deploy-sysdiag
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          sudo -u sysdiag git -C /opt/sysdiag/app pull --ff-only
+          sudo -u sysdiag -H /opt/sysdiag/.local/bin/uv --directory /opt/sysdiag/app sync --locked --no-dev
+          systemctl restart sysdiag
+          curl -fsS --retry 10 --retry-delay 2 --retry-connrefused http://localhost/health
+
+    - name: Install the release script for the Docker version
+      ansible.builtin.copy:
+        dest: /usr/local/bin/deploy-sysdiag-docker
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          tag="${1:?usage: deploy-sysdiag-docker <image tag>}"
+          image="{{ ecr_registry }}/linux-diagnostic-tool:$tag"
+
+          docker pull "$image"
+          docker rm -f sysdiag || true
+          docker run -d --name sysdiag --restart unless-stopped -p 127.0.0.1:8001:8000 "$image"
+          curl -fsS --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8001/health
+
+    - name: Install the AWS CLI (reads the image tag at boot)
+      ansible.builtin.command: snap install aws-cli --classic
+      args:
+        creates: /snap/bin/aws
+
+  handlers:
+    - name: Reload nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
