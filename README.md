@@ -1,6 +1,13 @@
 # AWS DevOps Lab
 
-A hands-on DevOps project. One real application, [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool) (a FastAPI service), is deployed on AWS once for each era of DevOps:
+A hands-on DevOps project. One real application, [linux-diagnostic-tool](https://github.com/Kishank00/linux-diagnostic-tool) (a FastAPI service), is deployed on AWS once for each era of DevOps.
+
+**Highlights**
+- **One app, four eras:** VM → Docker → multi-AZ Auto Scaling → golden AMI (Kubernetes next), each phase tagged and browsable.
+- **Zero-downtime releases:** immutable deploys by ASG instance refresh, with automatic rollback. 0 failed requests in 590 probes across two measured releases.
+- **Self-healing:** a terminated server is replaced in the same AZ and healthy in about 3.5 minutes, with no human action.
+- **Release time 15m42s → 6m28s** by baking the server image with Packer + Ansible and tuning the warmup and drain timers.
+- **Keyless, least-privilege CI/CD:** GitHub Actions with OIDC, one IAM role per pipeline, applies gated by approval.
 
 | Phase | How the app runs | Status |
 |---|---|---|
